@@ -1,33 +1,172 @@
 ---
-title: "5xfad_wt"
+title: "5XFAD_WT"
+author: "Joseph Bundy"
 output: html_notebook
+
+
 ---
 
 Analysis of NGS and proteomics data from 5xfad mouse brains - this analysis focuses only on the wt subset of the data
 
-Load relevant libraries and import data:
+# Import and data cleaning
 
-```{r}
+```{r setup, include=FALSE, echo=FALSE}
+require("knitr")
+opts_knit$set(root.dir = "E:/dev_workspace/5XFAD")
+```
+
+```{r, echo=FALSE}
 library("DESeq2")
 library("ggplot2")
 library("RColorBrewer")
+library("ashr")
+#library("BiocParallel")
 
-setwd("E:/dev_workspace/5XFAD")
+
 
 in_data_RNA <- read.csv("input/5XFAD_counts_unnorm.csv", header = T, stringsAsFactors=FALSE)
 
+sample_metadata= read.csv("input/5XFAD_NGS_meta.csv",header = T)
+row.names(sample_metadata) = sample_metadata[,1]
+sample_metadata = sample_metadata[2:61]
+
+```
+
+Clean data by splitting gene metadata columns from raw quantitative data
+```{r}
 row.names(in_data_RNA) = in_data_RNA[,1]
 raw_data_RNA <- in_data_RNA[-c(1:3)]
-raw_data_RNA <- data.frame(raw_data_RNA)
-head(raw_data_RNA)
+geneinfo<- in_data_RNA[1:3]
 ```
 
+Remove data from transgenic animals from dataset
 
 ```{r}
+sample_metadata_wt = sample_metadata[,sample_metadata[3,] == "wt"]
+sample_metadata_wt
+raw_data_RNA_wt = raw_data_RNA[,sample_metadata[3,] == "wt"]
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+Generate sample table for DESeq2 containing relevant sample metadata
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+```{r}
+SampleTable = data.frame(
+SampleName = colnames(raw_data_RNA_wt), 
+group = as.character(as.matrix(sample_metadata_wt["group",])),
+sex = as.character(as.matrix(sample_metadata_wt["sex",])),
+timepoint = as.character(as.matrix(sample_metadata_wt["timepoint",])))
+```
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r , warning = FALSE, message = FALSE}
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+countData = as.matrix(raw_data_RNA_wt),
+colData = SampleTable,
+design = ~group)
+dds = ddsFullCountTable
+dds <- DESeq(dds)
+
+```
+
+
+Generate normalized counts for export and for figures
+
+```{r}
+normalizedCounts <- t( t(counts(dds)) / sizeFactors(dds) )
+colnames(normalizedCounts) = SampleTable$group
+```
+
+# Function for pairwise comparisons
+  This function generates two DESeq2 results objects for each comparison and generates both an excel file and a figure for each comparison. In addition to the regular results call, we call lfcshrink to generate LFCs that better represent the moderation of LFC in DESeq2  It may seem needless complicated, but without this function, this code would be duplicated ~ 5 times.
+  
+
+```{r , warning = FALSE, message = FALSE}
+pairwise_comparison <- function(object, factor, group_1, group_2) {
+  opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
+  res = results(object, contrast=c(factor,group_1,group_2), 
+  alpha=0.05, 
+  independentFiltering = TRUE)
+  res = res[order(res$pvalue),]
+  
+  resLFC <- lfcShrink(object, contrast=c(factor,group_1,group_2), type="normal")
+  
+  table(res$padj > 0.05)
+  out_file <-  cbind(geneinfo,res)
+  write.csv(out_file,file = paste0("output/", group_1, "_vs_", group_2, ".csv"))
+  DE = subset(out_file, out_file$padj < 0.05)
+  UP = subset(out_file, out_file$padj < 0.05& out_file$log2FoldChange >0)
+  DOWN = subset(out_file, out_file$padj < 0.05& out_file$log2FoldChange <0)
+  
+
+  plotMA(resLFC,ylim=c(-2,2),main=paste0(group_1, "_vs_", group_2), alpha = 0.05)
+  textup = paste0("up ", length(UP$Associated.Gene.Name))
+  textdown =  paste0("down ", length(DOWN$Associated.Gene.Name))
+  textDE =  paste0(length(DE$Associated.Gene.Name), " DE")
+  text(x = .1, y =0.75, label = textup)
+  text(x = .1, y =-0.75, label = textdown)
+  text(x = 100000, y =0.9, label = textDE)
+  
+  return(data.frame("Gene.ID" = DE$Gene.ID,
+                    "Name" = DE$Associated.Gene.Name, 
+                    "L2FC" = DE$log2FoldChange,
+                    "pvalue" = DE$pvalue,
+                    "pagj" = DE$padj))
+}
+```
+
+# Differential expression analyses {.tabset .tabset-fade}
+
+## Sex differences at each timepoint
+
+```{r ,warning = FALSE, message = FALSE}
+opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
+wt_1m_f_vs_wt_1m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_f", group_2 = "wt_1m_m")
+wt_1m_f_vs_wt_1m_m
+wt_2m_f_vs_wt_2m_m = pairwise_comparison(object = dds, factor = "group",group_1 = "wt_2m_f", group_2 = "wt_2m_m")
+wt_2m_f_vs_wt_2m_m
+wt_4m_f_vs_wt_4m_m = pairwise_comparison(object = dds, factor = "group",group_1 = "wt_4m_f", group_2 = "wt_4m_m")
+wt_4m_f_vs_wt_4m_m
+```
+
+## Developmental changes within each sex
+
+```{r , warning = FALSE, message = FALSE}
+opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
+wt_1m_f_vs_wt_2m_f = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_f", group_2 = "wt_2m_f")
+wt_1m_f_vs_wt_2m_f
+wt_2m_f_vs_wt_4m_f = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_f", group_2 = "wt_4m_f")
+wt_2m_f_vs_wt_4m_f
+wt_1m_m_vs_wt_2m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_m", group_2 = "wt_2m_m")
+wt_1m_m_vs_wt_2m_m
+wt_2m_m_vs_wt_4m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_m", group_2 = "wt_4m_m")
+wt_2m_m_vs_wt_4m_m
+```
+
+
+
+***
+***
+# Pooled analysis of developmental changes
+Make a separate DESeq2 object with sex and timepoint info split into separate variables - this will allow the contrast of different ages while accounting for sex-differences in expression
+
+```{r , warning = FALSE, message = FALSE}
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = as.matrix(raw_data_RNA_wt),
+  colData = SampleTable,
+  design = ~sex + timepoint)
+dds_p = ddsFullCountTable
+dds_p <- DESeq(dds_p)
+```
+
+```{r, warning = FALSE, message = FALSE}
+opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
+month1_vs_month2 = pairwise_comparison(object = dds_p, factor = "timepoint", group_1 = "1 month", group_2 = "2 month")
+month1_vs_month2
+month2_vs_month4 = pairwise_comparison(object = dds_p, factor = "timepoint",group_1 = "2 month", group_2 = "4 month")
+month2_vs_month4
+```
+
+
+
+
+
