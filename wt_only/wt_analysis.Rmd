@@ -1,28 +1,37 @@
 ---
 title: "5XFAD_WT"
 author: "Joseph Bundy"
-output: html_notebook
-
-
+output: 
+  html_notebook:
+    theme: darkly
+    toc: yes
+  html_document:
+    toc: yes
 ---
 
 Analysis of NGS and proteomics data from 5xfad mouse brains - this analysis focuses only on the wt subset of the data
 
-# Import and data cleaning
+# Analysis of WT portion of 5XFAD mouse dataset {.tabset .tabset-fade}
+This report contains analyses of sex differences and developmental changes between female and male mice of 1, 2, and 4 months of age. 
+
+## Import and data cleaning
 
 ```{r setup, include=FALSE, echo=FALSE}
 require("knitr")
 opts_knit$set(root.dir = "E:/dev_workspace/5XFAD")
 ```
 
-```{r, echo=FALSE}
+```{r, message = FALSE}
 library("DESeq2")
 library("ggplot2")
 library("RColorBrewer")
 library("ashr")
-#library("BiocParallel")
+library("scatterplot3d")
+library("pheatmap")
+library("gridExtra")
+#library("venneuler")
 
-
+library("eulerr")
 
 in_data_RNA <- read.csv("input/5XFAD_counts_unnorm.csv", header = T, stringsAsFactors=FALSE)
 
@@ -76,29 +85,32 @@ normalizedCounts <- t( t(counts(dds)) / sizeFactors(dds) )
 colnames(normalizedCounts) = SampleTable$group
 ```
 
-# Function for pairwise comparisons
-  This function generates two DESeq2 results objects for each comparison and generates both an excel file and a figure for each comparison. In addition to the regular results call, we call lfcshrink to generate LFCs that better represent the moderation of LFC in DESeq2  It may seem needless complicated, but without this function, this code would be duplicated ~ 5 times.
+## Functions for analysis {.tabset .tabset-fade}
   
+
+### Pairwise comparisons
+
+This function generates two DESeq2 results objects for each comparison and generates both an excel file and a figure for each comparison. In addition to the regular results call, we call lfcshrink to generate LFCs that better represent the moderation of LFC in DESeq2  It may seem needless complicated, but without this function, this code would be duplicated many times.
 
 ```{r , warning = FALSE, message = FALSE}
 pairwise_comparison <- function(object, factor, group_1, group_2) {
-  opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
   res = results(object, contrast=c(factor,group_1,group_2), 
   alpha=0.05, 
   independentFiltering = TRUE)
-  res = res[order(res$pvalue),]
+  #res = res[order(res$pvalue),]
   
   resLFC <- lfcShrink(object, contrast=c(factor,group_1,group_2), type="normal")
   
   table(res$padj > 0.05)
   out_file <-  cbind(geneinfo,res)
+  out_file = out_file[order(out_file$pvalue),]
   write.csv(out_file,file = paste0("output/", group_1, "_vs_", group_2, ".csv"))
   DE = subset(out_file, out_file$padj < 0.05)
   UP = subset(out_file, out_file$padj < 0.05& out_file$log2FoldChange >0)
   DOWN = subset(out_file, out_file$padj < 0.05& out_file$log2FoldChange <0)
   
 
-  plotMA(resLFC,ylim=c(-2,2),main=paste0(group_1, "_vs_", group_2), alpha = 0.05)
+  plotMA(resLFC,ylim=c(-1,1),main=paste0(group_1, "_vs_", group_2), alpha = 0.05)
   textup = paste0("up ", length(UP$Associated.Gene.Name))
   textdown =  paste0("down ", length(DOWN$Associated.Gene.Name))
   textDE =  paste0(length(DE$Associated.Gene.Name), " DE")
@@ -110,63 +122,470 @@ pairwise_comparison <- function(object, factor, group_1, group_2) {
                     "Name" = DE$Associated.Gene.Name, 
                     "L2FC" = DE$log2FoldChange,
                     "pvalue" = DE$pvalue,
-                    "pagj" = DE$padj))
+                    "padj" = DE$padj))
 }
+
 ```
 
-# Differential expression analyses {.tabset .tabset-fade}
+### PCA plots
+This function is basically the same as the PCA function built into DESeq, but allows you to return more than just the top 2 principal components should you choose. 
 
-## Sex differences at each timepoint
+```{r , warning = FALSE, message = FALSE}
+
+
+JLB_PCA = function(object, intgroup="condition", ntop=500, returnData=FALSE)
+{
+  # calculate the variance for each gene
+  rv <- rowVars(assay(object))
+  
+  # select the ntop genes by variance
+  select <- order(rv, decreasing=TRUE)[seq_len(min(ntop, length(rv)))]
+  
+  # perform a PCA on the data in assay(x) for the selected genes
+  pca <- prcomp(t(assay(object)[select,]))
+  
+  # the contribution to the total variance for each component
+  percentVar <- pca$sdev^2 / sum( pca$sdev^2 )
+  
+  if (!all(intgroup %in% names(colData(object)))) {
+    stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+  
+  intgroup.df <- as.data.frame(colData(object)[, intgroup, drop=FALSE])
+  
+  # add the intgroup factors together to create a new grouping factor
+  group <- if (length(intgroup) > 1) {
+    factor(apply( intgroup.df, 1, paste, collapse=" : "))
+  } else {
+    colData(object)[[intgroup]]
+  }
+  
+  # assembly the data for the plot
+  d <- data.frame(PC1=pca$x[,1], PC2=pca$x[,2],PC3=pca$x[,3],PC4=pca$x[,4],PC5=pca$x[,5], group=group, intgroup.df, name=colnames(object))
+  
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[1:5]
+    return(d)
+  }
+  
+  ggplot(data=d, aes_string(x="PC1", y="PC2", color="group")) + geom_point(size=3) + 
+    xlab(paste0("PC1: ",round(percentVar[1] * 100),"% variance")) +
+    ylab(paste0("PC2: ",round(percentVar[2] * 100),"% variance")) +
+    coord_fixed()
+}
+
+```
+
+
+Function for 9 panel PCA plot
+
+```{r , warning = FALSE, message = FALSE}
+
+
+threewaypca <- function(PCA_object, color_map, pch_map) {
+empty1<- ggplot()+geom_point(aes(1,1), colour="white") +
+  geom_text(aes(x = 1, y = 1, label = "PC1"), color="black", size=10, parse = TRUE)+
+  theme(          
+    plot.background = element_blank(), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_blank(), 
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+
+empty2<- ggplot()+geom_point(aes(1,1), colour="white") +
+  geom_text(aes(x = 1, y = 1, label = "PC2"), color="black", size=10, parse = TRUE)+
+  theme(                              
+    plot.background = element_blank(), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_blank(), 
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+empty3<- ggplot()+geom_point(aes(1,1), colour="white") +
+  geom_text(aes(x = 1, y = 1, label = "PC3"), color="black", size=10, parse = TRUE)+
+  theme(                              
+    plot.background = element_blank(), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_blank(), 
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot1 = ggplot(PCA_object, aes(PC1, PC2,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"), labels = c("females", "males"))+
+  scale_shape_manual(values = c(21,24,22), labels = c("1month", "2month", "4month"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+guides(fill=guide_legend(title = "sex", override.aes = list(colour = c("#FFB6C1", "#5a5aff"))), shape = guide_legend(title = "age"))+
+  theme(legend.position=c(1.3, 0.5))
+
+plot2 = ggplot(PCA_object, aes(PC1, PC3,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_shape_manual(values = c(21,24,22))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC3: ",percentVar[3],"% variance")) +
+  theme(legend.position = "none")
+
+plot3 = ggplot(PCA_object, aes(PC2, PC1,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_shape_manual(values = c(21,24,22))+
+  xlab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ylab(paste0("PC1: ",percentVar[1],"% variance")) +
+  theme(legend.position = "none")
+
+plot4 = ggplot(PCA_object, aes(PC2, PC3,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_shape_manual(values = c(21,24,22))+
+  xlab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ylab(paste0("PC3: ",percentVar[3],"% variance")) +
+  theme(legend.position = "none")
+
+plot5 = ggplot(PCA_object, aes(PC3, PC1,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_shape_manual(values = c(21,24,22))+
+  xlab(paste0("PC3: ",percentVar[3],"% variance")) +
+  ylab(paste0("PC1: ",percentVar[1],"% variance")) +
+  theme(legend.position = "none")
+
+plot6 = ggplot(PCA_object, aes(PC3, PC2,fill = factor(color_map), pch = factor(pch_map))) + geom_point( size=4) +
+  scale_colour_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_fill_manual(values=c("#FFB6C1", "#5a5aff"))+
+  scale_shape_manual(values = c(21,24,22))+
+  xlab(paste0("PC3: ",percentVar[3],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme(legend.position = "none")
+
+grid.arrange(empty1, plot3, plot5, plot1, empty2, plot6, plot2, plot4, empty3,  ncol=3, nrow=3, widths=c(2,2,2), heights=c(2,2,2))
+}
+
+```
+
+### Venn Diagrams
+Function for a two set venn diagram
+```{r ,warning = FALSE, message = FALSE}
+
+venn.plot_2 <- function(name1, name2, list1, list2){
+colors <- brewer.pal(2, "Set1")
+v <- euler(c(
+"A"=length(setdiff(list1,list2)),
+"B"=length(setdiff(list2,list1)),
+"A&B"=length(intersect(list1,list2))
+))
+#v$labels <- c(name1, name2, name3)
+plot(v,
+labels = list(labels = c(name1, name2)),
+quantities = list(type = "counts"))
+}
+
+```
+
+Function for a three set venn diagram
+```{r ,warning = FALSE, message = FALSE}
+
+venn.plot_3 <- function(name1, name2, name3, list1, list2, list3){
+colors <- brewer.pal(3, "Set1")
+v <- euler(c(
+"A"=length(setdiff(list1,union(list2,list3))),
+"B"=length(setdiff(list2,union(list1,list3))),
+"C"=length(setdiff(list3,union(list1,list2))),
+"A&B" = length(setdiff(intersect(list1,list2),list3)),
+"A&C" = length(setdiff(intersect(list1,list3),list2)),
+"B&C" = length(setdiff(intersect(list2,list3),list1)),
+"A&B&C" = length(intersect(intersect(list1,list2),list3))
+))
+#v$labels <- c(name1, name2, name3)
+plot(v,
+labels = list(labels = c(name1, name2, name3)),
+quantities = list(type = "counts"))
+}
+
+
+```
+
+## Quality Control and Data Exploration {.tabset .tabset-fade}
+
+### Library Size
+```{r ,warning = FALSE, message = FALSE}
+hist_data = data.frame(
+"samples" = as.character(as.matrix(names(sample_metadata_wt))),
+"group" = as.character(as.matrix(sample_metadata_wt["group",])),
+"unnorm_sum" = colSums(counts(dds, normalized=FALSE)),
+"norm_sum" = colSums(counts(dds, normalized=TRUE)))
+
+#relevel names so that they're respected in graph
+hist_data$samples <- as.character(hist_data$samples)
+hist_data$samples <- factor(hist_data$samples, levels=unique(hist_data$samples))
+
+
+ggplot(hist_data) +
+  aes(x = samples, y = unnorm_sum, fill = group) +
+  geom_col()+
+  labs(size = 7,
+       x = "",
+       y = "Library size (reads)",
+       title = "Library size across RNA-Seq samples")+
+  theme(
+        #axis.text.x=element_text(colour="black", size = 10,angle = 45, hjust = 1),
+        axis.text.x=element_blank(),
+        axis.text.y=element_text(colour="black"),
+        axis.ticks = element_line(colour="black"),
+        plot.title = element_text(hjust = 0.5), 
+        plot.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(),
+        axis.line = element_line(size=.4)
+  )
+
+ggplot(hist_data) +
+  aes(x = samples, y = norm_sum, fill = group) +
+  geom_col()+
+  labs(size = 7,
+       x = "",
+       y = "Library size (reads)",
+       title = "Library size across RNA-Seq samples after normalization")+
+  theme(
+      #axis.text.x=element_text(colour="black", size = 10,angle = 45, hjust = 1),
+       axis.text.x=element_blank(),
+        axis.text.y=element_text(colour="black"),
+        axis.ticks = element_line(colour="black"),
+        plot.title = element_text(hjust = 0.5), 
+        plot.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(),
+        axis.line = element_line(size=.4)
+  )
+
+
+```
+
+
+### Sample Correlations
+```{r ,warning = FALSE, message = FALSE}
+rld <- rlogTransformation(dds, blind=FALSE)
+sampleDists <- dist( t( assay(rld) ) )
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( rld$genotype, rld$timepoint,rld$sex, sep="-" )
+colnames(sampleDistMatrix) <- paste( rld$genotype, rld$timepoint,rld$sex, sep="-" )
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+```
+### PCA 
+```{r ,warning = FALSE, message = FALSE, fig.height = 10}
+PCA_object <- JLB_PCA(rld, intgroup = c( "sex","timepoint"), returnData=TRUE, n = 500)
+percentVar <- round(100 * attr(PCA_object, "percentVar"))
+
+pch = as.factor(c(rep(16,10),rep(17,10),rep(15,10)))
+col = c(rep(c(rep("#5a5aff",5),rep("#FFB6C1",5)),3))
+
+
+threewaypca(PCA_object = PCA_object, color_map = col, pch_map = pch)
+
+
+```
+
+
+## Pairwise Comparisons {.tabset .tabset-fade}
+
+### Differences between Sexes at each month {.tabset .tabset-fade}
+
+#### 1 month Females vs Males
 
 ```{r ,warning = FALSE, message = FALSE}
-opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
 wt_1m_f_vs_wt_1m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_f", group_2 = "wt_1m_m")
 wt_1m_f_vs_wt_1m_m
+```
+#### 2 month Females vs Males 
+
+```{r ,warning = FALSE, message = FALSE}
 wt_2m_f_vs_wt_2m_m = pairwise_comparison(object = dds, factor = "group",group_1 = "wt_2m_f", group_2 = "wt_2m_m")
 wt_2m_f_vs_wt_2m_m
+```
+#### 4 month Females vs Males
+
+```{r ,warning = FALSE, message = FALSE}
 wt_4m_f_vs_wt_4m_m = pairwise_comparison(object = dds, factor = "group",group_1 = "wt_4m_f", group_2 = "wt_4m_m")
 wt_4m_f_vs_wt_4m_m
 ```
 
-## Developmental changes within each sex
+#### Set analysis
+
+```{r ,warning = FALSE, message = FALSE}
+venn.plot_3("1month", 
+"2month", 
+"4month", 
+wt_1m_f_vs_wt_1m_m$Gene.ID, 
+wt_2m_f_vs_wt_2m_m$Gene.ID, 
+wt_4m_f_vs_wt_4m_m$Gene.ID)
+```
+
+### Difference between Ages {.tabset .tabset-fade}
+
+#### By Sex {.tabset .tabset-fade}
+
+##### 1 vs 2 month {.tabset .tabset-fade}
+
+###### Females
 
 ```{r , warning = FALSE, message = FALSE}
-opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
 wt_1m_f_vs_wt_2m_f = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_f", group_2 = "wt_2m_f")
 wt_1m_f_vs_wt_2m_f
-wt_2m_f_vs_wt_4m_f = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_f", group_2 = "wt_4m_f")
-wt_2m_f_vs_wt_4m_f
+```
+###### Males
+
+```{r , warning = FALSE, message = FALSE}
+
 wt_1m_m_vs_wt_2m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_1m_m", group_2 = "wt_2m_m")
 wt_1m_m_vs_wt_2m_m
-wt_2m_m_vs_wt_4m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_m", group_2 = "wt_4m_m")
-wt_2m_m_vs_wt_4m_m
+```
+###### Set analysis
+
+```{r ,warning = FALSE, message = FALSE}
+venn.plot_2("1vs2month_Females", 
+"1vs2month_Males",  
+wt_1m_f_vs_wt_2m_f$Gene.ID, 
+wt_1m_m_vs_wt_2m_m$Gene.ID)
 ```
 
 
+##### 2 vs 4 month {.tabset .tabset-fade}
 
-***
-***
-# Pooled analysis of developmental changes
-Make a separate DESeq2 object with sex and timepoint info split into separate variables - this will allow the contrast of different ages while accounting for sex-differences in expression
+###### Females
+
+```{r , warning = FALSE, message = FALSE}
+
+wt_2m_f_vs_wt_4m_f = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_f", group_2 = "wt_4m_f")
+wt_2m_f_vs_wt_4m_f
+```
+###### Males
+
+```{r , warning = FALSE, message = FALSE}
+
+wt_2m_m_vs_wt_4m_m = pairwise_comparison(object = dds, factor = "group", group_1 = "wt_2m_m", group_2 = "wt_4m_m")
+wt_2m_m_vs_wt_4m_m
+```
+###### Set analysis
+
+```{r , warning = FALSE, message = FALSE}
+venn.plot_2("2vs4month_Females", 
+"2vs4month_Males",  
+wt_2m_f_vs_wt_4m_f$Gene.ID, 
+wt_2m_m_vs_wt_4m_m$Gene.ID)
+```
+
+#### Pooled analysis {.tabset .tabset-fade}
+Separate DESeq2 object with sex and timepoint info split into separate variables - allows the contrast of different ages while accounting for (pooling) sex-differences in expression
 
 ```{r , warning = FALSE, message = FALSE}
 ddsFullCountTable <- DESeqDataSetFromMatrix(
   countData = as.matrix(raw_data_RNA_wt),
   colData = SampleTable,
   design = ~sex + timepoint)
-dds_p = ddsFullCountTable
-dds_p <- DESeq(dds_p)
+dds_pooled = ddsFullCountTable
+
+dds_pooled_pairwise <- DESeq(dds_pooled)
 ```
+##### 1 vs 2 month
 
 ```{r, warning = FALSE, message = FALSE}
-opts_knit$set(root.dir = "E:/dev_workspace/5XFAD/wt_only")
-month1_vs_month2 = pairwise_comparison(object = dds_p, factor = "timepoint", group_1 = "1 month", group_2 = "2 month")
+month1_vs_month2 = pairwise_comparison(object = dds_pooled_pairwise, factor = "timepoint", group_1 = "1 month", group_2 = "2 month")
 month1_vs_month2
-month2_vs_month4 = pairwise_comparison(object = dds_p, factor = "timepoint",group_1 = "2 month", group_2 = "4 month")
+```
+##### 2 vs 4 month
+
+```{r, warning = FALSE, message = FALSE}
+month2_vs_month4 = pairwise_comparison(object = dds_pooled_pairwise, factor = "timepoint",group_1 = "2 month", group_2 = "4 month")
 month2_vs_month4
+```
+##### Set Analysis
+
+```{r , warning = FALSE, message = FALSE}
+venn.plot_2("1_vs_2month", 
+"2_vs_4month",  
+month1_vs_month2$Gene.ID, 
+month2_vs_month4$Gene.ID)
+```
+
+## LRT for temporal changes in expression
+
+Rebuild the DESeq2 object with a design formula that includes both sex and time as factors, then we include only "sex" in the reduced formula, thus testing only for genes that change significantly as a function of the "age" factor. 
+
+```{r , warning = FALSE, message = FALSE}
+
+dds_pooled_LRT <- DESeq(dds_pooled, reduced = ~sex, test = "LRT")
+res_LRT = results(dds_pooled_LRT, alpha = 0.05, independentFiltering = TRUE)
+
+#generate some factors for the heatmap key
+ann_colors = list(
+  sex = c(male = "#89cff0", female = "#FFB6C1"),
+  timepoint = c("1 month" = "#7570B3", "2 month" = "#E7298A", "4 month" = "#66A61E")
+)
+
+out_file <-  cbind(geneinfo,res_LRT)
+write.csv(out_file,file = "output/LRT_changes_over_time.csv")
+
+siggenes <- head(order(res_LRT$padj),50)
+mat <- assay(rld)[ siggenes, ]
+names <- mcols(rld)[ siggenes, ]
+names <- names[,1]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(rld)[,c("sex","timepoint")])
+pheatmap(scale = "row", fontsize = 7,mat, annotation_col=df, cluster_col=FALSE, show_rownames = FALSE,show_colnames = FALSE,  annotation_colors = ann_colors, col=topo.colors(100), border_color = NA)
 ```
 
 
+## LRT for Sex:Age Interaction 
+
+Rebuild the DESeq2 object with a design formula that includes sex, time, and a sex:time interraction term - all but the last of which will be entered in the "reduced" formula
+
+```{r , warning = FALSE, message = FALSE}
+ddsFullCountTable <- DESeqDataSetFromMatrix(
+  countData = as.matrix(raw_data_RNA_wt),
+  colData = SampleTable,
+  design = ~sex+timepoint+sex:timepoint)
+  dds_interaction = ddsFullCountTable
+  mcols(dds_interaction) <- DataFrame(mcols(dds_interaction), geneinfo)
+ dds_interaction <- DESeq(dds_interaction, reduced = ~sex+timepoint, test = "LRT")
+ res_interaction = results(dds_interaction, alpha = 0.05)
+ 
+out_file <-  cbind(geneinfo,res_interaction)
+write.csv(out_file,file = "output/sex_by_time.csv")
 
 
-
+siggenes <- head(order(res_interaction$padj),table(res_interaction$padj > 0.05)[1])
+mat <- assay(rld)[ siggenes, ]
+names <- mcols(rld)[ siggenes, ]
+names <- names[,1]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(rld)[,c("sex","timepoint")])
+pheatmap(scale = "row", fontsize = 7,mat, annotation_col=df, cluster_col=FALSE, show_rownames = FALSE,show_colnames = FALSE,  annotation_colors = ann_colors, col=topo.colors(100), border_color = NA)
+```
